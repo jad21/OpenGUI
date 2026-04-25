@@ -68,6 +68,9 @@ export const MAX_TEXTAREA_HEIGHT_PX = 200;
 /** Small-window breakpoint for prompt box layout (px). */
 export const SMALL_WINDOW_BREAKPOINT_PX = 640;
 
+/** Number of projects to show per "page" in the sidebar. */
+export const PROJECT_PAGE_SIZE = 10;
+
 /** Number of sessions to show per "page" in the sidebar. */
 export const SESSION_PAGE_SIZE = 5;
 

@@ -11,6 +11,7 @@ import {
 	GitMerge,
 	MessageSquare,
 	Plus,
+	Search,
 	ShieldAlert,
 	SquarePen,
 	Terminal,
@@ -51,11 +52,13 @@ import {
 	CTX_ITEM_CLASS,
 	CTX_SEPARATOR_CLASS,
 	CTX_SUBTRIGGER_CLASS,
+	MAX_RECENT_PROJECTS,
 	POST_MERGE_DELAY_MS,
+	PROJECT_PAGE_SIZE,
 	SESSION_PAGE_SIZE,
 	STORAGE_KEYS,
 } from "@/lib/constants";
-import { storageGet } from "@/lib/safe-storage";
+import { storageGet, storageParsed, storageSetJSON } from "@/lib/safe-storage";
 import {
 	abbreviatePath,
 	buildPRUrl,
@@ -123,6 +126,10 @@ export function AppSidebar({
 	const [editValue, setEditValue] = useState("");
 	const [showRemoteProjectInput, setShowRemoteProjectInput] = useState(false);
 	const [remoteProjectPath, setRemoteProjectPath] = useState("");
+	const [projectFilter, setProjectFilter] = useState("");
+	const [recentProjects, setRecentProjects] = useState<Record<string, number>>(
+		() => storageParsed<Record<string, number>>(STORAGE_KEYS.RECENT_PROJECTS) ?? {},
+	);
 	const editInputRef = useRef<HTMLInputElement>(null);
 
 	const startEditing = useCallback(
@@ -294,6 +301,13 @@ export function AppSidebar({
 		setKnownWorktrees((prev) => pruneRecord(prev, validDirs));
 		setRemoteUrls((prev) => pruneRecord(prev, validDirs));
 		setCollapsed((prev) => pruneRecord(prev, validDirs));
+		setRecentProjects((prev) => {
+			const next = pruneRecord(prev, validDirs);
+			if (Object.keys(next).length !== Object.keys(prev).length) {
+				storageSetJSON(STORAGE_KEYS.RECENT_PROJECTS, next);
+			}
+			return next;
+		});
 	}, [openDirectories]);
 
 	// Track collapsed state per project
@@ -304,6 +318,8 @@ export function AppSidebar({
 	const [visibleByProject, setVisibleByProject] = useState<
 		Record<string, number>
 	>({});
+	const [visibleProjectCount, setVisibleProjectCount] =
+		useState(PROJECT_PAGE_SIZE);
 	const [projectPopover, setProjectPopover] = useState<{
 		directory: string;
 		top: number;
@@ -323,6 +339,33 @@ export function AppSidebar({
 		? (projectGroups.get(projectPopover.directory) ?? [])
 		: [];
 	const projectEntries = useMemo(() => Array.from(projectGroups), [projectGroups]);
+	const recentProjectEntries = useMemo(
+		() =>
+			[...projectEntries].sort(([directoryA], [directoryB]) => {
+				const recentA = recentProjects[directoryA] ?? 0;
+				const recentB = recentProjects[directoryB] ?? 0;
+				return recentB - recentA;
+			}),
+		[projectEntries, recentProjects],
+	);
+	const filteredProjectEntries = useMemo(() => {
+		const query = projectFilter.trim().toLowerCase();
+		if (!query) return recentProjectEntries;
+		return recentProjectEntries.filter(([directory]) => {
+			const projectName = getProjectName(directory).toLowerCase();
+			return projectName.includes(query) || directory.toLowerCase().includes(query);
+		});
+	}, [recentProjectEntries, projectFilter]);
+	const visibleProjectEntries = useMemo(
+		() => filteredProjectEntries.slice(0, visibleProjectCount),
+		[filteredProjectEntries, visibleProjectCount],
+	);
+	const hasMoreProjects = filteredProjectEntries.length > visibleProjectCount;
+	const canShowLessProjects = visibleProjectCount > PROJECT_PAGE_SIZE;
+
+	useEffect(() => {
+		setVisibleProjectCount(PROJECT_PAGE_SIZE);
+	}, [projectFilter]);
 	const workspaceProjectDirectories = activeWorkspace?.projects ?? [];
 	const reorderableProjectDirectories = useMemo(
 		() =>
@@ -346,6 +389,20 @@ export function AppSidebar({
 	const projectLabel = detachedProject
 		? getProjectName(detachedProject)
 		: "Your projects";
+
+	const markProjectRecent = useCallback((directory: string) => {
+		setRecentProjects((prev) => {
+			const sortedEntries = Object.entries({
+				...prev,
+				[directory]: Date.now(),
+			})
+				.sort(([, timestampA], [, timestampB]) => timestampB - timestampA)
+				.slice(0, MAX_RECENT_PROJECTS);
+			const next = Object.fromEntries(sortedEntries);
+			storageSetJSON(STORAGE_KEYS.RECENT_PROJECTS, next);
+			return next;
+		});
+	}, []);
 
 	const clearProjectDragState = useCallback(() => {
 		setDraggingProjectDirectory(null);
@@ -481,8 +538,25 @@ export function AppSidebar({
 								</button>
 							)}
 						</SidebarGroupLabel>
+						<div className="px-2 pb-2 group-data-[collapsible=icon]:hidden">
+							<div className="relative">
+								<Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+								<Input
+									value={projectFilter}
+									onChange={(event) => setProjectFilter(event.target.value)}
+									placeholder="Filter projects..."
+									className="h-8 pl-7 text-xs"
+									onClick={(event) => event.stopPropagation()}
+								/>
+							</div>
+						</div>
 						<SidebarGroupContent>
-							{projectEntries.map(([directory, dirSessions]) => {
+							{filteredProjectEntries.length === 0 ? (
+								<div className="px-3 py-2 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+									No projects match “{projectFilter.trim()}”.
+								</div>
+							) : (
+								visibleProjectEntries.map(([directory, dirSessions]) => {
 								const isCollapsed = collapsed[directory] ?? false;
 								const connStatus = connections[directory];
 								const isProjectConnected = connStatus?.state === "connected";
@@ -608,6 +682,7 @@ export function AppSidebar({
 																	event.stopPropagation();
 																	return;
 																}
+																markProjectRecent(directory);
 																if (sidebarState === "collapsed") {
 																	event.preventDefault();
 																	event.stopPropagation();
@@ -685,11 +760,13 @@ export function AppSidebar({
 																	className="ml-auto opacity-0 group-hover/project:opacity-100 transition-opacity shrink-0 size-6 rounded-md flex items-center justify-center hover:bg-accent group-data-[collapsible=icon]:hidden"
 																	onClick={(e) => {
 																		e.stopPropagation();
+																		markProjectRecent(directory);
 																		startDraftSession(directory);
 																	}}
 																	onKeyDown={(e) => {
 																		if (e.key === "Enter" || e.key === " ") {
 																			e.stopPropagation();
+																			markProjectRecent(directory);
 																			startDraftSession(directory);
 																		}
 																	}}
@@ -984,6 +1061,7 @@ export function AppSidebar({
 																					onClick={() => {
 																						if (editingSessionId === session.id)
 																							return;
+																						markProjectRecent(directory);
 																						void selectSession(session.id);
 																					}}
 																					className={`group/session min-w-0 ${colorBorderClass}`}
@@ -1164,7 +1242,39 @@ export function AppSidebar({
 										)}
 									</div>
 								);
-							})}
+								})
+							)}
+							{hasMoreProjects && (
+								<SidebarMenu className="group-data-[collapsible=icon]:hidden">
+									<SidebarMenuItem>
+										<SidebarMenuButton
+											onClick={() => {
+												setVisibleProjectCount((prev) => prev + PROJECT_PAGE_SIZE);
+											}}
+											className="text-muted-foreground min-w-0"
+										>
+											<ChevronDown className="shrink-0" />
+											<span className="truncate">
+												Load more projects (
+												{filteredProjectEntries.length - visibleProjectCount})
+											</span>
+										</SidebarMenuButton>
+									</SidebarMenuItem>
+								</SidebarMenu>
+							)}
+							{canShowLessProjects && !hasMoreProjects && (
+								<SidebarMenu className="group-data-[collapsible=icon]:hidden">
+									<SidebarMenuItem>
+										<SidebarMenuButton
+											onClick={() => setVisibleProjectCount(PROJECT_PAGE_SIZE)}
+											className="text-muted-foreground min-w-0"
+										>
+											<ChevronUp className="shrink-0" />
+											<span className="truncate">Show fewer projects</span>
+										</SidebarMenuButton>
+									</SidebarMenuItem>
+								</SidebarMenu>
+							)}
 						</SidebarGroupContent>
 					</SidebarGroup>
 				)}
@@ -1191,6 +1301,7 @@ export function AppSidebar({
 								<button
 									type="button"
 									onClick={() => {
+										markProjectRecent(projectPopover.directory);
 										startDraftSession(projectPopover.directory);
 										setProjectPopover(null);
 									}}
@@ -1219,6 +1330,7 @@ export function AppSidebar({
 											<button
 												type="button"
 												onClick={() => {
+													markProjectRecent(projectPopover.directory);
 													void selectSession(session.id);
 													setProjectPopover(null);
 												}}
